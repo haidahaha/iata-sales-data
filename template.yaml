@@ -1,0 +1,130 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  sales-data-collector
+
+  Sample SAM Template for sales-data-collector
+
+Globals:
+  Function:
+    Timeout: 900
+    AutoPublishAlias: live
+    MemorySize: 1024
+
+Resources:
+  SalesDataLakeS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: 'iata-sales-data-lake'
+
+  SalesGlueDefaultIamRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+              - glue.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+
+  SalesDataFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: src/sales_data
+      DockerTag: v1
+    Properties:
+      PackageType: Image
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref SalesDataLakeS3Bucket
+          DATABASE_NAME: "salesdata"
+      Role: !GetAtt SalesGlueDefaultIamRole.Arn
+      Events:
+        SalesDataFetchSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: 'rate(5 minutes)'
+            Name: 'sales_data_fetch_schedule'
+            Enabled: false
+
+  SalesGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: "salesdata"
+        Description: Glue metadata catalog database sales dataset
+
+  RawSalesGlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: 'rawsales'
+      DatabaseName: !Ref SalesGlueDatabase
+      Description: Crawls the Raw Sales Data
+      Role: !GetAtt SalesGlueDefaultIamRole.Arn
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${SalesDataLakeS3Bucket}/rawsalesdata"
+      Schedule:
+        ScheduleExpression: cron(0 1 * * ? *) # run every day at 1 am
+
+  # CleanSalesGlueCrawler:
+  #   Type: AWS::Glue::Crawler
+  #   Properties:
+  #     Name: 'cleansales'
+  #     DatabaseName: !Ref SalesGlueDatabase
+  #     Description: Crawls the Clean Sales Data
+  #     Role: !GetAtt SalesGlueDefaultIamRole.Arn
+  #     Targets:
+  #       S3Targets:
+  #         - Path: !Sub "s3://${SalesDataLakeS3Bucket}/cleansales"
+  #     Schedule:
+  #       ScheduleExpression: cron(0 2 * * ? *) # run every day at 2 am
+
+  # RawSalesCleanerGlueEtlJob:
+  #   Type: AWS::Glue::Job
+  #   DependsOn: RawSalesGlueCrawler
+  #   Properties:
+  #     Description: PySpark Glue job cleans, reformats, and enriches raw Sales Data
+  #     GlueVersion: 2.0
+  #     Command:
+  #       Name: glueetl
+  #       ScriptLocation: !Ref GlueEtlScriptS3Path
+  #       PythonVersion: 3
+  #     MaxCapacity: 10
+  #     MaxRetries: 2
+  #     Role: !GetAtt SalesGlueDefaultIamRole.Arn
+  #     Timeout: 5
+  #     DefaultArguments: {
+  #         "--s3_bucket": !Sub "${SalesDataLakeS3Bucket}",
+  #         "--glue_database": !Sub "${SalesGlueDatabase}",
+  #         "--rawsales_table": "rawsalesdata",
+  #         "--cleansales_table": "cleansales"
+  #       }
+
+  # RawSalesCleanerGlueTrigger:
+  #   Type: AWS::Glue::Trigger
+  #   DependsOn: RawSalesCleanerGlueEtlJob
+  #   Properties:
+  #     Actions:
+  #       - JobName: !Ref RawSalesCleanerGlueEtlJob
+  #     Description: Initiates Glue PySpark Job that processes the raw sales data
+  #     Predicate:
+  #       Conditions:
+  #         - CrawlerName: !Ref RawSalesGlueCrawler
+  #           CrawlState: SUCCEEDED
+  #           State: SUCCEEDED
+  #           LogicalOperator: EQUALS
+  #     Type: CONDITIONAL
+  #     StartOnCreation: true
+
